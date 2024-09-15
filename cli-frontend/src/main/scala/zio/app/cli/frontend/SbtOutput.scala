@@ -1,14 +1,10 @@
 package zio.app.cli.frontend
 
-import com.raquo.laminar.api.L._
 import animus._
-import fansi._
+import com.raquo.laminar.api.L._
 import zio.Chunk
 import zio.app.cli.protocol
-import zio.app.cli.protocol.{Attribute, Line}
-
-import scala.collection.mutable.ListBuffer
-import scala.util.Try
+import zio.app.cli.protocol.Line
 
 case class SbtOutput(
     $lines: Signal[Chunk[Line]],
@@ -117,11 +113,13 @@ case class SbtOutput(
   )
 
   def attrStyles(attribute: protocol.Attribute): Mod[HtmlElement] = attribute match {
-    case protocol.Attribute.Red    => cls("console-red")
-    case protocol.Attribute.Yellow => cls("console-yellow")
-    case protocol.Attribute.Blue   => cls("console-blue")
-    case protocol.Attribute.Green  => cls("console-green")
-    case protocol.Attribute.Bold   => fontWeight.bold
+    case protocol.Attribute.Red     => cls("console-red")
+    case protocol.Attribute.Yellow  => cls("console-yellow")
+    case protocol.Attribute.Blue    => cls("console-blue")
+    case protocol.Attribute.Green   => cls("console-green")
+    case protocol.Attribute.Cyan    => cls("console-cyan")
+    case protocol.Attribute.Magenta => cls("console-magenta")
+    case protocol.Attribute.Bold    => fontWeight.bold
   }
 
   val $rendered = $lines.map(_.zipWithIndex.toVector).split(_._2) { (_, value, _) =>

@@ -3,12 +3,8 @@ package zio.app
 import fansi.{Attr, Bold, Category, Str}
 import zio.app.DevMode.{backendLines, frontendLines}
 import zio.app.cli.protocol.{Attribute, Fragment, Line}
-import zio.blocking.Blocking
 import zio.stream._
-import zio.{Chunk, Has, URLayer, _}
-
-import scala.collection.mutable.ListBuffer
-import scala.reflect.runtime.universe.Try
+import zio._
 
 trait SbtManager {
   def backendSbtStream: Stream[Throwable, Chunk[Line]]
@@ -17,22 +13,20 @@ trait SbtManager {
 }
 
 object SbtManager {
-  val live: URLayer[Blocking, Has[SbtManager]] =
-    SbtManagerLive.toLayer[SbtManager]
+  val live: ULayer[SbtManager] =
+    ZLayer.succeed(SbtManagerLive())
 
-  val backendSbtStream: ZStream[Has[SbtManager], Throwable, Chunk[Line]] =
-    ZStream.accessStream[Has[SbtManager]](_.get.backendSbtStream)
+  val backendSbtStream: ZStream[SbtManager, Throwable, Chunk[Line]] =
+    ZStream.environmentWithStream[SbtManager](_.get.backendSbtStream)
 
-  val frontendSbtStream: ZStream[Has[SbtManager], Throwable, Chunk[Line]] =
-    ZStream.accessStream[Has[SbtManager]](_.get.frontendSbtStream)
+  val frontendSbtStream: ZStream[SbtManager, Throwable, Chunk[Line]] =
+    ZStream.environmentWithStream[SbtManager](_.get.frontendSbtStream)
 
-  val launchVite: ZStream[Has[SbtManager], Throwable, Nothing] =
-    ZStream.accessStream[Has[SbtManager]](_.get.launchVite)
+  val launchVite: ZStream[SbtManager, Throwable, Nothing] =
+    ZStream.environmentWithStream[SbtManager](_.get.launchVite)
 }
 
-case class SbtManagerLive(blocking: zio.blocking.Blocking.Service) extends SbtManager {
-  private val env: Has[Blocking.Service] = Has(blocking)
-
+case class SbtManagerLive() extends SbtManager {
   override def backendSbtStream: Stream[Throwable, Chunk[Line]] =
     backendLines
       .map { s =>
@@ -40,7 +34,6 @@ case class SbtManagerLive(blocking: zio.blocking.Blocking.Service) extends SbtMa
         str.map(renderDom).map(Chunk(_)).getOrElse(Chunk.empty)
       }
       .scan[Chunk[Line]](Chunk.empty)(_ ++ _)
-      .provide(env)
 
   override def frontendSbtStream: Stream[Throwable, Chunk[Line]] =
     frontendLines
@@ -49,10 +42,9 @@ case class SbtManagerLive(blocking: zio.blocking.Blocking.Service) extends SbtMa
         str.map(renderDom).map(Chunk(_)).getOrElse(Chunk.empty)
       }
       .scan[Chunk[Line]](Chunk.empty)(_ ++ _)
-      .provide(env)
 
   override def launchVite: Stream[Throwable, Nothing] =
-    ZStream.fromEffect(DevMode.launchVite.exitCode).drain.provide(env)
+    ZStream.fromZIO(DevMode.launchVite.exitCode).drain
 
   def renderDom(str: Str): Line = {
     val chars  = str.getChars
@@ -103,14 +95,14 @@ case class SbtManagerLive(blocking: zio.blocking.Blocking.Service) extends SbtMa
       nextState: Str.State,
       output: StringBuilder,
       categoryArray: Array[Category]
-  ) = {
+  ): Option[Chunk[Attribute]] = {
     if (currentState != nextState) {
       val builder     = ChunkBuilder.make[Attribute]()
       val hardOffMask = Bold.mask
 
       val currentState2 =
         if ((currentState & ~nextState & hardOffMask) != 0) {
-          output.append(Console.RESET)
+          output.append(scala.Console.RESET)
           0L
         } else {
           currentState
@@ -122,13 +114,15 @@ case class SbtManagerLive(blocking: zio.blocking.Blocking.Service) extends SbtMa
         if ((cat.mask & currentState2) != (cat.mask & nextState)) {
           val attr = cat.lookupAttr(nextState & cat.mask)
           attr.name match {
-            case "Color.Red"    => builder += Attribute.Red
-            case "Color.Yellow" => builder += Attribute.Yellow
-            case "Color.Blue"   => builder += Attribute.Blue
-            case "Color.Green"  => builder += Attribute.Green
-            case "Bold.On"      => builder += Attribute.Bold
-            case "Color.Reset"  => ()
-            case _              => println(attr.name)
+            case "Color.Red"     => builder += Attribute.Red
+            case "Color.Yellow"  => builder += Attribute.Yellow
+            case "Color.Blue"    => builder += Attribute.Blue
+            case "Color.Green"   => builder += Attribute.Green
+            case "Color.Magenta" => builder += Attribute.Magenta
+            case "Color.Cyan"    => builder += Attribute.Cyan
+            case "Bold.On"       => builder += Attribute.Bold
+            case "Color.Reset"   => ()
+            case _               => println(attr.name)
           }
           val escape = cat.lookupEscape(nextState & cat.mask)
           output.append(escape)

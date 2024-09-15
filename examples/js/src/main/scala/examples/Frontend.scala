@@ -6,7 +6,6 @@ import examples.ParameterizedService.CreateFoo
 import org.scalajs.dom
 import zio._
 import zio.app.DeriveClient
-import zio.duration.durationInt
 
 object Frontend {
   def main(args: Array[String]): Unit = {
@@ -23,9 +22,9 @@ object Frontend {
 
   val events: Var[Vector[String]] = Var(Vector.empty)
 
-  def view: Div = {
+  def view: Div =
     div(
-      beginStream,
+//      beginStream,
       debugView("Magic Number", exampleClient.magicNumber),
       debugView("Unit", exampleClient.unit),
       debugView("All Foos", fooClient.getAll),
@@ -34,16 +33,17 @@ object Frontend {
         div(event._1)
       }
     )
-  }
 
   val beginStream: Modifier[Element] = onMountCallback { _ =>
-    runtime.unsafeRunAsync_ {
-      exampleClient.eventStream
-        .retry(Schedule.spaced(1.second))
-        .foreach { event =>
-          println(s"RECEIVED: $event")
-          UIO(events.update(_.appended(event.toString)))
-        }
+    Unsafe.unsafe { implicit u =>
+      runtime.unsafe.fork {
+        exampleClient.eventStream
+          .retry(Schedule.spaced(1.second))
+          .foreach { event =>
+            println(s"RECEIVED: $event")
+            ZIO.succeed(events.update(_.appended(event.toString)))
+          }
+      }
     }
   }
 
@@ -55,8 +55,10 @@ object Frontend {
         strings.map(div(_))
       },
       onClick --> { _ =>
-        runtime.unsafeRunAsync_ {
-          effect.tap { a => UIO(output.update(_.prepended(a.toString))) }
+        Unsafe.unsafe { implicit u =>
+          runtime.unsafe.fork {
+            effect.tap(a => ZIO.succeed(output.update(_.prepended(a.toString))))
+          }
         }
       }
     )

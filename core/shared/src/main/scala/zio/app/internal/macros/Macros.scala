@@ -1,7 +1,7 @@
 package zio.app.internal.macros
 
-import zhttp.http._
-import zio.Has
+import zio.http._
+import zio.app.ClientConfig
 import zio.stream.ZStream
 
 import scala.language.experimental.macros
@@ -10,13 +10,17 @@ import scala.reflect.macros.blackbox
 private[app] class Macros(val c: blackbox.Context) {
   import c.universe._
 
-  def client_impl[Service: c.WeakTypeTag]: c.Tree = {
+  // Frontend Macro for deriving Clients
 
+  def client_impl[Service: c.WeakTypeTag]: c.Tree =
+    client_config_impl[Service](c.Expr[ClientConfig](q"_root_.zio.app.ClientConfig.empty"))
+
+  def client_config_impl[Service: c.WeakTypeTag](config: c.Expr[ClientConfig]): c.Tree = {
     val serviceType = c.weakTypeOf[Service]
     assertValidMethods(serviceType)
 
-    val appliedTypes               = getAppliedTypes[Service](serviceType)
-    def applyType(tpe: Type): Type = tpe.map { tpe => appliedTypes.getOrElse(tpe.typeSymbol, tpe) }
+    val appliedTypes               = getAppliedTypes(serviceType)
+    def applyType(tpe: Type): Type = tpe.map(tpe => appliedTypes.getOrElse(tpe.typeSymbol, tpe))
 
     val methodDefs = serviceType.decls.collect { case method: MethodSymbol =>
       val methodName = method.name
@@ -34,23 +38,22 @@ private[app] class Macros(val c: blackbox.Context) {
 
       //                                            0  1  2 <-- Accesses the return type of the ZIO
       //                                        ZIO[R, E, A]
-      val errorType  = method.returnType.dealias.typeArgs(1)
       val returnType = applyType(method.returnType.dealias.typeArgs(2))
       val isStream =
         method.returnType.dealias.typeConstructor <:< weakTypeOf[ZStream[Any, Nothing, Any]].typeConstructor
 
       val request =
-            if (isStream) {
-              if (params.isEmpty)
-                q"""_root_.zio.app.FrontendUtils.fetchStream[$errorType, $returnType](config.getString("zio.app.backendUri"), ${serviceType.finalResultType.toString}, ${methodName.toString})"""
-              else
-                q"""_root_.zio.app.FrontendUtils.fetchStream[$errorType, $returnType](config.getString("zio.app.backendUri"), ${serviceType.finalResultType.toString}, ${methodName.toString}, Pickle.intoBytes($pickleType))"""
-            } else {
-              if (params.isEmpty)
-                q"""_root_.zio.app.FrontendUtils.fetch[$errorType, $returnType](config.getString("zio.app.backendUri"), ${serviceType.finalResultType.toString}, ${methodName.toString})"""
-              else
-                q"""_root_.zio.app.FrontendUtils.fetch[$errorType, $returnType](config.getString("zio.app.backendUri"), ${serviceType.finalResultType.toString}, ${methodName.toString}, Pickle.intoBytes($pickleType))"""
-            }
+        if (isStream) {
+          if (params.isEmpty)
+            q"_root_.zio.app.FrontendUtils.fetchStream[$returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, $config)"
+          else
+            q"_root_.zio.app.FrontendUtils.fetchStream[$returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, Pickle.intoBytes($pickleType), $config)"
+        } else {
+          if (params.isEmpty)
+            q"_root_.zio.app.FrontendUtils.fetch[$returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, $config)"
+          else
+            q"_root_.zio.app.FrontendUtils.fetch[$returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, Pickle.intoBytes($pickleType), $config)"
+        }
 
       q"def $methodName(...$valDefs): ${applyType(method.returnType)} = $request"
     }
@@ -61,27 +64,28 @@ new ${serviceType.finalResultType} {
   import _root_.boopickle.Default._
   import _root_.zio.app.internal.CustomPicklers._
   import _root_.zio.app.FrontendUtils.exPickler
-  import _root_.com.typesafe.config.{Config, ConfigFactory}
-
-  private val config = ConfigFactory.load()
 
   ..$methodDefs
 }
        """
-    println(result)
     result
   }
 
-  def routes_impl[Service: c.WeakTypeTag]: c.Expr[HttpApp[Has[Service], Throwable]] = {
+  // Backend Macro for deriving Routes
+
+  // Type     -> c.WeakTypeTag
+  // TypeRepr -> c.Type
+  def routes_impl[Service: c.WeakTypeTag]: c.Expr[HttpApp[Service, Throwable]] = {
     val serviceType = c.weakTypeOf[Service]
     assertValidMethods(serviceType)
 
     val appliedTypes               = getAppliedTypes(serviceType)
-    def applyType(tpe: Type): Type = tpe.map { tpe => appliedTypes.getOrElse(tpe.typeSymbol, tpe) }
+    def applyType(tpe: Type): Type = tpe.map(tpe => appliedTypes.getOrElse(tpe.typeSymbol, tpe))
 
     val blocks = serviceType.decls.collect { case method: MethodSymbol =>
       val methodName = method.name
 
+      // (Int, String)
       val argsType = method.paramLists.flatten.collect {
         case param: TermSymbol if !param.isImplicit => applyType(param.typeSignature)
       } match {
@@ -102,31 +106,29 @@ new ${serviceType.finalResultType} {
       val block =
         if (isStream) {
           if (method.paramLists.flatten.isEmpty)
-            q"""_root_.zio.app.internal.BackendUtils.makeRouteNullaryStream[Has[$serviceType], $errorType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { $callMethod })"""
+            q"""_root_.zio.app.internal.BackendUtils.makeRouteNullaryStream[$serviceType, $errorType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { $callMethod })"""
           else
-            q"""_root_.zio.app.internal.BackendUtils.makeRouteStream[Has[$serviceType], $errorType, $argsType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { (unpickled: $argsType) => $callMethod })"""
+            q"""_root_.zio.app.internal.BackendUtils.makeRouteStream[$serviceType, $errorType, $argsType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { (unpickled: $argsType) => $callMethod })"""
         } else {
           if (method.paramLists.flatten.isEmpty)
-            q"""_root_.zio.app.internal.BackendUtils.makeRouteNullary[Has[$serviceType], $errorType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { $callMethod })"""
+            q"""_root_.zio.app.internal.BackendUtils.makeRouteNullary[$serviceType, $errorType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { $callMethod })"""
           else
-            q"""_root_.zio.app.internal.BackendUtils.makeRoute[Has[$serviceType], $errorType, $argsType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { (unpickled: $argsType) => $callMethod })"""
+            q"""_root_.zio.app.internal.BackendUtils.makeRoute[$serviceType, $errorType, $argsType, $returnType](${serviceType.finalResultType.toString}, ${methodName.toString}, { (unpickled: $argsType) => $callMethod })"""
         }
 
       block
     }
 
-    val block = blocks.reduce((a, b) => q"$a +++ $b")
+    val block = blocks.reduce((a, b) => q"$a ++ $b")
 
-    val result = c.Expr[HttpApp[Has[Service], Throwable]](q"""
-import _root_.zhttp.http._
+    val result = c.Expr[HttpApp[Service, Throwable]](q"""
+import _root_.zio.http._
 import _root_.boopickle.Default._
 import _root_.zio.app.internal.CustomPicklers._
 import _root_.zio.app.internal.BackendUtils.exPickler
-
+  
 $block
         """)
-
-    println(result)
 
     result
   }
@@ -142,9 +144,9 @@ $block
     }
 
     if (method.returnType.dealias.typeConstructor <:< typeOf[ZStream[Any, Nothing, Any]].typeConstructor)
-      q"_root_.zio.stream.ZStream.accessStream[_root_.zio.Has[$service]](_.get.${method.name}(...$params))"
+      q"_root_.zio.stream.ZStream.environmentWithStream[$service](_.get.${method.name}(...$params))"
     else
-      q"_root_.zio.ZIO.serviceWith[$service](_.${method.name}(...$params))"
+      q"_root_.zio.ZIO.serviceWithZIO[$service](_.${method.name}(...$params))"
   }
 
   private def hasTypeParameters(t: Type): Boolean = t match {
@@ -152,6 +154,9 @@ $block
     case _           => false
   }
 
+  /**
+   * Assures the given trait's declarations contain no type parameters.
+   */
   private def assertValidMethods(t: Type): Unit = {
     val methods = t.decls.filter(m => hasTypeParameters(m.typeSignature))
     if (methods.nonEmpty) {
@@ -159,7 +164,9 @@ $block
     }
   }
 
-  private def getAppliedTypes[Service: c.WeakTypeTag](serviceType: c.Type) = {
+  // Symbol -> Type
+  // Service[A] -> Service[Int]
+  // Map(A -> Int)
+  private def getAppliedTypes[Service: c.WeakTypeTag](serviceType: c.Type): Map[c.universe.Symbol, c.universe.Type] =
     (serviceType.typeConstructor.typeParams zip serviceType.typeArgs).toMap
-  }
 }
